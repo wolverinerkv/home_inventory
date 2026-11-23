@@ -1,0 +1,14 @@
+{
+  "appId": "com.homepantry.app",
+  "appName": "Home Pantry",
+  "webDir": "www",
+  "android": {
+    "allowMixedContent": false,
+    "captureInput": false,
+    "webContentsDebuggingEnabled": false
+  },
+  "server": {
+    "androidScheme": "https",
+    "cleartext": false
+  }
+}

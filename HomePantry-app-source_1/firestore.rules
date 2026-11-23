@@ -1,0 +1,94 @@
+rules_version = '2';
+// Home Pantry — Firestore security rules.
+// Deny by default. Only signed-in members of a household can read/write its data.
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function signedIn() { return request.auth != null; }
+    function hhPath(hid) { return /databases/$(database)/documents/households/$(hid); }
+    function isMember(hid) {
+      return signedIn() && exists(/databases/$(database)/documents/households/$(hid)/members/$(request.auth.uid));
+    }
+    function isOwner(hid) { return signedIn() && get(hhPath(hid)).data.owner == request.auth.uid; }
+    function str(v, min, max) { return v is string && v.size() >= min && v.size() <= max; }
+    function numIn(v, min, max) { return (v is int || v is float) && v >= min && v <= max; }
+
+    // Each user's pointer to their household. Private to that user.
+    match /users/{uid} {
+      allow read, delete: if signedIn() && request.auth.uid == uid;
+      allow create, update: if signedIn() && request.auth.uid == uid
+        && request.resource.data.keys().hasOnly(['householdId'])
+        && str(request.resource.data.householdId, 0, 64);
+    }
+
+    match /households/{hid} {
+      allow read: if isMember(hid);
+      allow create: if signedIn()
+        && request.resource.data.keys().hasOnly(['name', 'owner', 'secret', 'createdAt'])
+        && request.resource.data.owner == request.auth.uid
+        && str(request.resource.data.name, 1, 40)
+        && str(request.resource.data.secret, 32, 64)
+        && numIn(request.resource.data.createdAt, 0, 9999999999999);
+      // Owner may rename or reset the invite secret; ownership can't be transferred here.
+      allow update: if signedIn() && resource.data.owner == request.auth.uid
+        && request.resource.data.keys().hasOnly(['name', 'owner', 'secret', 'createdAt'])
+        && request.resource.data.owner == resource.data.owner
+        && str(request.resource.data.name, 1, 40)
+        && str(request.resource.data.secret, 32, 64);
+      allow delete: if signedIn() && resource.data.owner == request.auth.uid;
+
+      // Joining requires the household's current invite secret.
+      match /members/{uid} {
+        allow read: if isMember(hid);
+        allow create: if signedIn() && request.auth.uid == uid
+          && request.resource.data.keys().hasOnly(['name', 'secret', 'joinedAt'])
+          && str(request.resource.data.name, 1, 40)
+          && request.resource.data.secret == get(hhPath(hid)).data.secret
+          && numIn(request.resource.data.joinedAt, 0, 9999999999999);
+        allow update: if signedIn() && request.auth.uid == uid
+          && request.resource.data.keys().hasOnly(['name', 'secret', 'joinedAt'])
+          && request.resource.data.secret == resource.data.secret
+          && str(request.resource.data.name, 1, 40);
+        allow delete: if signedIn() && (request.auth.uid == uid || isOwner(hid));
+      }
+
+      match /items/{itemId} {
+        allow read, delete: if isMember(hid);
+        allow create, update: if isMember(hid) && validItem(request.resource.data);
+      }
+
+      match /months/{month}/events/{eventId} {
+        allow read, delete: if isMember(hid) && month.matches('^[0-9]{4}-[0-9]{2}$');
+        allow create: if isMember(hid) && month.matches('^[0-9]{4}-[0-9]{2}$')
+          && validEvent(request.resource.data);
+        allow update: if false; // history is append-only (undo deletes the entry)
+      }
+    }
+
+    function validItem(d) {
+      return d.keys().hasOnly(['name', 'category', 'unit', 'qty', 'minQty', 'useStep', 'lastPrice', 'createdBy', 'updatedAt'])
+        && str(d.name, 1, 60)
+        && str(d.category, 1, 40)
+        && str(d.unit, 1, 10)
+        && numIn(d.qty, -100000, 100000)
+        && numIn(d.minQty, 0, 100000)
+        && numIn(d.useStep, 0.001, 100000)
+        && numIn(d.lastPrice, 0, 10000000)
+        && str(d.createdBy, 0, 128)
+        && numIn(d.updatedAt, 0, 9999999999999);
+    }
+
+    function validEvent(d) {
+      return d.keys().hasOnly(['itemId', 'itemName', 'category', 'unit', 'type', 'qty', 'price', 'by', 'at'])
+        && d.by == request.auth.uid
+        && d.type in ['buy', 'use', 'adjust']
+        && str(d.itemId, 1, 64)
+        && str(d.itemName, 1, 60)
+        && str(d.category, 1, 40)
+        && str(d.unit, 1, 10)
+        && numIn(d.qty, -100000, 100000)
+        && numIn(d.price, 0, 10000000)
+        && numIn(d.at, 0, 9999999999999);
+    }
+  }
+}
